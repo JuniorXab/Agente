@@ -106,9 +106,10 @@ input[type=password]::placeholder{letter-spacing:0;}
 // CONFIG — cargado desde localStorage
 // ─────────────────────────────────────────
 const CFG = {
-  get GROQ()   { return localStorage.getItem("cb_groq")   || ""; },
-  get GEMINI() { return localStorage.getItem("cb_gemini") || ""; },
-  get SERP()   { return localStorage.getItem("cb_serp")   || ""; },
+  get GROQ()    { return localStorage.getItem("cb_groq")    || ""; },
+  get GEMINI()  { return localStorage.getItem("cb_gemini")  || ""; },
+  get SERP()    { return localStorage.getItem("cb_serp")    || ""; },
+  get OPENROUTER(){ return localStorage.getItem("cb_openrouter") || ""; },
 };
 
 // ─────────────────────────────────────────
@@ -128,7 +129,7 @@ const SPORTS = [
 const AGENTS = [
   {id:"stats",   name:"Agente Estadístico", model:"Llama-3.3-70b",       icon:"📊",color:"#00d4ff",desc:"Forma · H2H · Rendimiento"},
   {id:"market",  name:"Agente de Mercado",  model:"Gemini 1.5 Flash",    icon:"💹",color:"#f5a623",desc:"Cuotas · Líneas · Valor +EV"},
-  {id:"context", name:"Agente Contextual",  model:"Llama-3.1-8b-instant",icon:"🧠",color:"#7ed321",desc:"Lesiones · Motivación · Noticias"},
+  {id:"context", name:"Agente Contextual",  model:"OpenRouter / Llama-3.3-70b free", icon:"🧠",color:"#7ed321",desc:"Lesiones · Motivación · Noticias"},
 ];
 
 const SCHEMA = `{"pick":"[selección concreta]","probability":72,"confidence":7,"reasoning":"[2-3 oraciones de análisis]","key_factors":["f1","f2","f3"],"warning":null}`;
@@ -216,7 +217,7 @@ async function callMarket(match, sport, market) {
   const ctx = await serpSearch(`${match} cuotas apuestas odds ${market} 2025`);
   const prompt = `${SYS.market}\n\nPartido: ${match}\nDeporte: ${sport}\nMercado: ${market}\n\nDatos web:\n${ctx||"(sin datos, estima con contexto)"}\n\nAnaliza y termina con <answer>{...}</answer>`;
   const r = await fetchT(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${CFG.GEMINI}`, {
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${CFG.GEMINI}`, {
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:0.25,maxOutputTokens:800}})
@@ -228,22 +229,33 @@ async function callMarket(match, sport, market) {
 }
 
 // ─────────────────────────────────────────
-// AGENTE 3 — Groq Llama-3.1-8b (Contextual)
+// AGENTE 3 — OpenRouter (gratis) o Groq fallback
+// openrouter.ai → gratis con: meta-llama/llama-3.3-70b-instruct:free
 // ─────────────────────────────────────────
 async function callContext(match, sport, market) {
-  if (!CFG.GROQ) throw new Error("Sin Groq API key");
   const ctx = await serpSearch(`${match} lesiones noticias alineación ${new Date().getFullYear()}`);
+  const msgs = [
+    {role:"system", content:SYS.context},
+    {role:"user",   content:`Partido: ${match}\nDeporte: ${sport}\nMercado: ${market}\n\nNoticias:\n${ctx||"(sin datos, analiza con tu conocimiento)"}\n\nAnaliza y termina con <answer>{...}</answer>`}
+  ];
+
+  // Intentar OpenRouter primero (gratis)
+  if (CFG.OPENROUTER) {
+    const r = await fetchT("https://openrouter.ai/api/v1/chat/completions", {
+      method:"POST",
+      headers:{"Content-Type":"application/json","Authorization":`Bearer ${CFG.OPENROUTER}`,"HTTP-Referer":"https://github.com","X-Title":"Consensus Betting"},
+      body:JSON.stringify({ model:"meta-llama/llama-3.3-70b-instruct:free", max_tokens:800, temperature:0.25, messages:msgs })
+    });
+    const d = await r.json();
+    if (!d.error) return parseResp(d.choices[0].message.content);
+  }
+
+  // Fallback: Groq llama-3.1-8b-instant
+  if (!CFG.GROQ) throw new Error("Sin OpenRouter ni Groq key configurada");
   const r = await fetchT("https://api.groq.com/openai/v1/chat/completions", {
     method:"POST",
     headers:{"Content-Type":"application/json","Authorization":`Bearer ${CFG.GROQ}`},
-    body:JSON.stringify({
-      model:"llama-3.1-8b-instant",
-      max_tokens:800, temperature:0.25,
-      messages:[
-        {role:"system", content:SYS.context},
-        {role:"user",   content:`Partido: ${match}\nDeporte: ${sport}\nMercado: ${market}\n\nNoticias recientes:\n${ctx||"(sin datos, analiza con tu conocimiento)"}\n\nAnaliza y termina con <answer>{...}</answer>`}
-      ]
-    })
+    body:JSON.stringify({ model:"llama-3.1-8b-instant", max_tokens:800, temperature:0.25, messages:msgs })
   });
   const d = await r.json();
   if (d.error) throw new Error(d.error.message);
@@ -568,9 +580,10 @@ function renderStats(){
 function renderConfig(){
   const el=document.getElementById("tab-config"); if(!el)return;
   const fields=[
-    {key:"cb_groq",  label:"Groq API Key",     hint:"console.groq.com — Gratis",               ph:"gsk_...",    req:true},
-    {key:"cb_gemini",label:"Gemini API Key",   hint:"aistudio.google.com — Gratis",             ph:"AIza...",    req:false},
-    {key:"cb_serp",  label:"SerpAPI Key",       hint:"serpapi.com — 100 búsquedas/mes gratis",  ph:"...",        req:false},
+    {key:"cb_groq",        label:"Groq API Key",        hint:"console.groq.com — Gratis",                  ph:"gsk_...",  req:true},
+    {key:"cb_gemini",      label:"Gemini API Key",       hint:"aistudio.google.com — Gratis",               ph:"AIza...",  req:false},
+    {key:"cb_openrouter",  label:"OpenRouter API Key",   hint:"openrouter.ai — Gratis (modelos :free)",     ph:"sk-or-...",req:false},
+    {key:"cb_serp",        label:"SerpAPI Key",          hint:"serpapi.com — 100 búsquedas/mes gratis",     ph:"...",      req:false},
   ];
   const statusDot=(key)=>{
     const val=localStorage.getItem(key);
@@ -618,7 +631,7 @@ function toggleVis(id,btn){
   btn.textContent=inp.type==="password"?"MOSTRAR":"OCULTAR";
 }
 function saveKeys(){
-  ["cb_groq","cb_gemini","cb_serp"].forEach(k=>{
+  ["cb_groq","cb_gemini","cb_openrouter","cb_serp"].forEach(k=>{
     const val=document.getElementById(`inp-${k}`)?.value?.trim()||"";
     val?localStorage.setItem(k,val):localStorage.removeItem(k);
   });
